@@ -1,0 +1,238 @@
+## Task: Create an LXD container setup script for copilot development
+
+### Overview
+
+Create a Python script in this project `setup_container.py` that sets up an
+LXD container named `craft-llm` for copilot development. The script manages bind
+mounts, uid/gid mapping, package installation, and runs basic verification tests.
+
+---
+
+### Environment facts
+
+These should be determined when the script runs, not hard-coded:
+
+- Username:    callahan.kovacs@canonical.com
+- Home dir:    /home/callahan.kovacs@canonical.com
+- UID:         1522341876
+- GID:         1561755903
+- The user is a member of the `lxd` group, so `lxd` commands can be run without sudo.
+
+---
+
+### Step 1 – Create the directory and script file
+
+Create the script `setup_container.py` script.
+
+---
+
+### Step 2 – Script requirements
+
+The script must be a self-contained Python 3 script. It should use only the standard
+library plus `subprocess` calls to `lxc`. Do NOT use pylxd or any third-party library.
+
+It should be as simple as possible. No need to make it over-customizable or extensible for future improvements.
+
+#### CLI interface
+
+```
+python3 setup_container.py [--recreate]
+```
+
+- If the container `craft-llm` already exists and `--recreate` is NOT passed, print an
+  error and exit with a non-zero code.
+- If `--recreate` is passed and the container exists, force-stop and delete it before
+  recreating.
+
+#### Container creation
+
+1. Launch an Ubuntu 24.04 LTS container:
+   ```
+   lxc launch ubuntu:24.04 craft-llm
+   ```
+
+2. Wait for the container to be ready (poll `lxc exec craft-llm -- true` until it
+   succeeds, with a timeout of 60 seconds).
+
+#### UID/GID mapping (CRITICAL – read carefully)
+
+The host user has a very high UID (1522341876) and GID (1561755903). LXD's default
+subuid/subgid ranges do not cover these values, which means naive bind mounts will show
+files as owned by `nobody`/`nogroup` inside the container, and writes from inside the
+container will fail or corrupt ownership.
+
+The correct solution is to use LXD's `raw.idmap` feature to create a direct 1:1 mapping
+for the host UID and GID into the container. This tells LXD to pass the host uid/gid
+through unchanged to the container, so file ownership appears correct on both sides.
+
+Set these container config values BEFORE adding the disk devices:
+
+```
+lxc config set craft-llm raw.idmap "uid 1522341876 1000\ngid 1561755903 1000"
+```
+
+This maps host uid 1522341876 → container uid 1000 (the default `ubuntu` user), and
+host gid 1561755903 → container gid 1000. Files owned by the host user will appear
+owned by `ubuntu` inside the container, and vice versa. Ownership and permissions of
+the mounted files will be transparent from the container's perspective.
+
+After setting raw.idmap, restart the container so the mapping takes effect:
+```
+lxc restart craft-llm
+```
+Then wait for it to be ready again.
+
+#### Bind mounts
+
+Add these three bind mounts as LXD disk devices. Use `shift=false` (the default) since
+raw.idmap handles the mapping. The `source` is the host path; the `path` is the
+container path.
+
+| Device name | Host source path                                          | Container path              |
+|-------------|-----------------------------------------------------------|-----------------------------|
+| github      | /home/callahan.kovacs@canonical.com/.github               | /home/ubuntu/.github        |
+| copilot     | /home/callahan.kovacs@canonical.com/.copilot              | /home/ubuntu/.copilot       |
+| dev         | /home/callahan.kovacs@canonical.com/dev                   | /home/ubuntu/dev            |
+
+Add each with:
+```
+lxc config device add craft-llm <name> disk source=<host_path> path=<container_path>
+```
+
+After adding devices, restart once more and wait for readiness.
+
+#### Package installation
+
+Run the following inside the container as root:
+```
+lxc exec craft-llm -- apt-get update -q
+lxc exec craft-llm -- apt-get install -y build-essential
+```
+
+Install copilot cli with the script:
+`curl -fsSL https://gh.io/copilot-install | bash`
+
+#### Run `make setup` in snapcraft
+
+After installation, run `make setup` in the snapcraft repo as the `ubuntu` user:
+```
+lxc exec craft-llm --user 1000 --group 1000 \
+  --env HOME=/home/ubuntu \
+  -- bash -c "cd /home/ubuntu/dev/craft/snapcraft && make setup"
+```
+
+This may take several minutes. Stream the output live rather than capturing it, so the
+user can see progress.
+
+---
+
+### Step 3 – Verification tests
+
+After setup, run these tests. Print a clear PASS/FAIL for each. If any test fails,
+print the failure reason and exit with a non-zero code at the end.
+
+1. **Container running**: `lxc list craft-llm --format=json` shows status == "Running".
+
+2. **Build-essential installed**:
+   ```
+   lxc exec craft-llm -- dpkg -l build-essential
+   ```
+   Should exit 0.
+
+3. **gh installed**:
+   ```
+   lxc exec craft-llm -- gh --version
+   ```
+   Should exit 0.
+
+4. **Copilot cli installed**:
+   ```
+   lxc exec craft-llm --user 1000 --group 1000 --env HOME=/home/ubuntu \
+     -- copilot --version
+   ```
+   Output should contain "copilot".
+
+5. **dev mount works (read)**:
+   ```
+   lxc exec craft-llm -- ls /home/ubuntu/dev
+   ```
+   Should exit 0 and list files (snapcraft should be visible since it exists on host).
+
+6. **dev mount ownership transparent**:
+   ```
+   lxc exec craft-llm -- stat -c "%U" /home/ubuntu/dev/craft/snapcraft
+   ```
+   Should return "ubuntu" (not "nobody" or "root").
+
+7. **.github mount works**:
+   ```
+   lxc exec craft-llm -- ls /home/ubuntu/.github
+   ```
+   Should exit 0.
+
+8. **.copilot mount works**:
+   ```
+   lxc exec craft-llm -- ls /home/ubuntu/.copilot
+   ```
+   Should exit 0.
+
+9. **Write transparency** (create a temp file from inside the container, verify host
+   ownership is correct):
+   ```
+   lxc exec craft-llm --user 1000 --group 1000 \
+     -- touch /home/ubuntu/dev/.craft_llm_test_file
+   ```
+   Then on the host, check:
+   ```python
+   import os, stat
+   st = os.stat("/home/callahan.kovacs@canonical.com/dev/.craft_llm_test_file")
+   assert st.st_uid == 1522341876
+   # also assert gid
+   ```
+   Then clean up the test file.
+
+10. **make setup completed**: Check that a virtualenv or `.venv` directory exists in
+    `/home/ubuntu/dev/craft/snapcraft` (the typical output of `make setup`):
+    ```
+    lxc exec craft-llm -- ls /home/ubuntu/dev/craft/snapcraft/.venv
+    ```
+
+---
+
+### Step 4 – Final output
+
+If all tests pass, print a summary like:
+```
+============================================================
+craft-llm container is ready!
+  Mounts: ~/.github, ~/.copilot, ~/dev  →  /home/ubuntu/{...}
+  UID/GID mapping: transparent (host 1522341876 ↔ container ubuntu)
+  Packages: build-essential, gh, gh-copilot extension
+  snapcraft make setup: complete
+All 10 tests passed.
+============================================================
+```
+
+---
+
+### Important implementation notes
+
+- Use `subprocess.run(..., check=True)` for commands that must succeed.
+- For long-running commands (apt install, make setup), use `subprocess.run` without
+  capturing stdout/stderr so output streams to the terminal in real time.
+- The `raw.idmap` newline must be a literal newline in the shell argument, not `\n`.
+  Use a Python multiline string or `"uid 1522341876 1000\ngid 1561755903 1000"` with
+  actual embedded newline when passing to subprocess.
+- If `~/.github` or `~/.copilot` do not exist on the host yet, create them before
+  adding the disk device (LXD requires the source path to exist).
+- Make the script executable: `chmod +x setup_container.py` and add a shebang line
+  `#!/usr/bin/env python3`.
+
+---
+
+### Deliverable
+
+A single file: `~/dev/craft/craft-llm/setup_container.py`
+
+Run it with `python3 ~/dev/craft/craft-llm/setup_container.py` to complete the full
+setup. The script should be idempotent when `--recreate` is used.
