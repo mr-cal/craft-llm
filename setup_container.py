@@ -8,18 +8,23 @@ import subprocess
 import sys
 import time
 
-CONTAINER = "craft-llm"
-HOME = os.path.expanduser("~")
+DEFAULT_CONTAINER = "craft-llm"
+CONTAINER = DEFAULT_CONTAINER  # may be overridden in main() via --name
 HOST_UID = os.getuid()
 HOST_GID = os.getgid()
-CONTAINER_USER = "ubuntu"
+HOST_HOME = os.path.expanduser("~")
+HOST_USER = os.path.basename(os.path.normpath(HOST_HOME))
+
+# The container user is renamed to match the host, so paths are identical.
+CONTAINER_USER = HOST_USER
 CONTAINER_UID = 1000
 CONTAINER_GID = 1000
+CONTAINER_HOME = HOST_HOME
 
 MOUNTS = [
-    ("github", f"{HOME}/.github", f"/home/{CONTAINER_USER}/.github"),
-    ("copilot", f"{HOME}/.copilot", f"/home/{CONTAINER_USER}/.copilot"),
-    ("dev", f"{HOME}/dev", f"/home/{CONTAINER_USER}/dev"),
+    ("github", f"{HOST_HOME}/.github", f"{CONTAINER_HOME}/.github"),
+    ("copilot", f"{HOST_HOME}/.copilot", f"{CONTAINER_HOME}/.copilot"),
+    ("dev", f"{HOST_HOME}/dev", f"{CONTAINER_HOME}/dev"),
 ]
 
 
@@ -45,11 +50,28 @@ def wait_for_container(timeout=90):
         )
         if r.returncode == 0:
             print(" ready.")
+            break
+        print(".", end="", flush=True)
+        time.sleep(2)
+    else:
+        print()
+        sys.exit(f"ERROR: {CONTAINER} did not become ready within {timeout}s.")
+
+    print("  Waiting for cloud-init...", end="", flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["lxc", "exec", CONTAINER, "--", "cloud-init", "status"],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0 and "done" in r.stdout:
+            print(" done.")
             return
         print(".", end="", flush=True)
         time.sleep(2)
     print()
-    sys.exit(f"ERROR: {CONTAINER} did not become ready within {timeout}s.")
+    sys.exit(f"ERROR: cloud-init did not finish within {timeout}s.")
 
 
 def container_exists():
@@ -66,8 +88,27 @@ def create_container():
     print(f"\n[1/5] Launching {CONTAINER} (ubuntu:24.04)...")
     run(["lxc", "launch", "ubuntu:24.04", CONTAINER])
     wait_for_container()
-    # LXD creates /home/ubuntu owned by root; fix so ubuntu user can write there
-    run(["lxc", "exec", CONTAINER, "--", "chown", "ubuntu:ubuntu", "/home/ubuntu"])
+    # Rename the default ubuntu user/group to match the host user, and move the
+    # home directory to the same path as on the host.  This ensures venv scripts
+    # (whose shebangs reference HOST_HOME) resolve correctly in both environments
+    # without any symlinks or re-syncing.
+    run(
+        [
+            "lxc", "exec", CONTAINER, "--",
+            "usermod",
+            "--badname",
+            "--login", CONTAINER_USER,
+            "--home", CONTAINER_HOME,
+            "--move-home",
+            "ubuntu",
+        ]
+    )
+    run(
+        [
+            "lxc", "exec", CONTAINER, "--",
+            "groupmod", "--new-name", CONTAINER_USER, "ubuntu",
+        ]
+    )
 
 
 def configure_idmap():
@@ -139,22 +180,17 @@ def install_packages():
 
 
 def run_make_setup():
-    print("\n[5/5] Running make setup in snapcraft (this may take a few minutes)...")
-    run(
-        [
-            "lxc",
-            "exec",
-            CONTAINER,
-            f"--user={CONTAINER_UID}",
-            f"--group={CONTAINER_GID}",
-            "--env",
-            "HOME=/home/ubuntu",
-            "--",
-            "bash",
-            "-c",
-            "cd /home/ubuntu/dev/craft/snapcraft && make setup",
-        ]
-    )
+    """Run ``make setup`` on the host.
+
+    Because the container user has been renamed to match the host user (same
+    username, same home path), the venv scripts produced here have shebangs that
+    resolve correctly in both environments without any extra steps.
+    """
+    snapcraft_dir = os.path.join(HOST_HOME, "dev", "craft", "snapcraft")
+    if not os.path.isdir(snapcraft_dir):
+        sys.exit(f"ERROR: snapcraft directory not found: {snapcraft_dir}")
+    print(f"\n[5/5] Running make setup in snapcraft ({snapcraft_dir})...")
+    run(["make", "setup"], cwd=snapcraft_dir)
 
 
 # ── Verification tests ────────────────────────────────────────────────────────
@@ -205,7 +241,7 @@ def run_tests():
                 f"--user={CONTAINER_UID}",
                 f"--group={CONTAINER_GID}",
                 "--env",
-                "HOME=/home/ubuntu",
+                f"HOME={CONTAINER_HOME}",
                 "--",
                 "copilot",
                 "--version",
@@ -220,7 +256,7 @@ def run_tests():
 
     def t_dev_mount_read():
         r = subprocess.run(
-            ["lxc", "exec", CONTAINER, "--", "ls", "/home/ubuntu/dev/craft"],
+            ["lxc", "exec", CONTAINER, "--", "ls", f"{CONTAINER_HOME}/dev/craft"],
             capture_output=True,
             text=True,
             check=True,
@@ -237,31 +273,33 @@ def run_tests():
                 "stat",
                 "-c",
                 "%U",
-                "/home/ubuntu/dev/craft/snapcraft",
+                f"{CONTAINER_HOME}/dev/craft/snapcraft",
             ],
             capture_output=True,
             text=True,
             check=True,
         )
         owner = r.stdout.strip()
-        assert owner == "ubuntu", f"owner is {owner!r}, expected 'ubuntu'"
+        assert owner == CONTAINER_USER, (
+            f"owner is {owner!r}, expected {CONTAINER_USER!r}"
+        )
 
     def t_github_mount():
         subprocess.run(
-            ["lxc", "exec", CONTAINER, "--", "ls", "/home/ubuntu/.github"],
+            ["lxc", "exec", CONTAINER, "--", "ls", f"{CONTAINER_HOME}/.github"],
             capture_output=True,
             check=True,
         )
 
     def t_copilot_mount():
         subprocess.run(
-            ["lxc", "exec", CONTAINER, "--", "ls", "/home/ubuntu/.copilot"],
+            ["lxc", "exec", CONTAINER, "--", "ls", f"{CONTAINER_HOME}/.copilot"],
             capture_output=True,
             check=True,
         )
 
     def t_write_transparency():
-        test_file = f"{HOME}/dev/.craft_llm_test_file"
+        test_file = f"{HOST_HOME}/dev/.{CONTAINER}_test_file"
         subprocess.run(
             [
                 "lxc",
@@ -271,7 +309,7 @@ def run_tests():
                 f"--group={CONTAINER_GID}",
                 "--",
                 "touch",
-                "/home/ubuntu/dev/.craft_llm_test_file",
+                f"{CONTAINER_HOME}/dev/.{CONTAINER}_test_file",
             ],
             check=True,
         )
@@ -291,11 +329,32 @@ def run_tests():
                 CONTAINER,
                 "--",
                 "ls",
-                "/home/ubuntu/dev/craft/snapcraft/.venv",
+                f"{CONTAINER_HOME}/dev/craft/snapcraft/.venv",
             ],
             capture_output=True,
             check=True,
         )
+
+    def t_container_user():
+        r = subprocess.run(
+            ["lxc", "exec", CONTAINER, "--", "id", "-un", f"{CONTAINER_UID}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        name = r.stdout.strip()
+        assert name == CONTAINER_USER, (
+            f"uid {CONTAINER_UID} maps to {name!r}, expected {CONTAINER_USER!r}"
+        )
+
+    def t_venv_interpreter_valid():
+        """Venv Python interpreter must be executable on the host."""
+        python = os.path.join(
+            HOST_HOME, "dev", "craft", "snapcraft", ".venv", "bin", "python3"
+        )
+        assert os.path.exists(python), f"not found: {python}"
+        r = subprocess.run([python, "--version"], capture_output=True, text=True)
+        assert r.returncode == 0, f"exit {r.returncode}: {r.stderr.strip()}"
 
     tests = [
         ("Container running", t_running),
@@ -308,6 +367,8 @@ def run_tests():
         (".copilot mount works", t_copilot_mount),
         ("Write transparency", t_write_transparency),
         ("make setup completed (.venv)", t_venv_exists),
+        (f"container user is {CONTAINER_USER!r}", t_container_user),
+        ("venv Python interpreter valid on host", t_venv_interpreter_valid),
     ]
 
     results = [check(name, fn) for name, fn in tests]
@@ -318,11 +379,12 @@ def run_tests():
     if all(results):
         print("=" * 60)
         print("craft-llm container is ready!")
-        print("  Mounts: ~/.github, ~/.copilot, ~/dev  →  /home/ubuntu/{...}")
+        print(f"  Mounts: ~/.github, ~/.copilot, ~/dev  →  {CONTAINER_HOME}/{{...}}")
         print(
             f"  UID/GID mapping: transparent "
-            f"(host {HOST_UID}:{HOST_GID} ↔ container ubuntu)"
+            f"(host {HOST_UID}:{HOST_GID} ↔ container {CONTAINER_USER})"
         )
+        print(f"  Container user: {CONTAINER_USER}")
         print("  Packages: build-essential, copilot CLI")
         print("  snapcraft make setup: complete")
         print(f"All {total} tests passed.")
@@ -337,7 +399,13 @@ def run_tests():
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"Set up the {CONTAINER} LXD container for copilot development."
+        description="Set up an LXD container for copilot development."
+    )
+    parser.add_argument(
+        "--name",
+        default=DEFAULT_CONTAINER,
+        help=f"Container name (default: {DEFAULT_CONTAINER}). "
+        f"Use e.g. '{DEFAULT_CONTAINER}-1' to run multiple containers.",
     )
     parser.add_argument(
         "--recreate",
@@ -345,6 +413,9 @@ def main():
         help="Delete and recreate the container if it already exists.",
     )
     args = parser.parse_args()
+
+    global CONTAINER
+    CONTAINER = args.name
 
     if container_exists():
         if not args.recreate:
