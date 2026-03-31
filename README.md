@@ -14,13 +14,7 @@ on *craft* projects.
    resolve correctly in both environments without any symlinks or re-syncing.
 3. Configures a 1:1 UID/GID mapping so that bind-mounted files appear owned by
    the container user inside the container and by the host user outside it.
-4. Adds three bind mounts from the host into the container:
-
-   | Host path       | Container path        |
-   |-----------------|-----------------------|
-   | `~/.github`     | `~/.github`           |
-   | `~/dev`         | `~/dev`               |
-
+4. Bind mounts `~/.github` and `~/dev` into the container.
 5. Installs `build-essential`, the `gh` CLI, and the GitHub Copilot CLI.
 6. Runs `make setup` in the snapcraft repository.
 7. Runs verification tests to ensure the container is working.
