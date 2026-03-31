@@ -23,6 +23,7 @@ on *craft* projects.
 
 - Ubuntu host with LXD installed and the current user in the `lxd` group.
 - The `~/dev/craft/snapcraft` repository must exist on the host.
+- A PAT token for authorizing copilot
 
 ## Usage
 
