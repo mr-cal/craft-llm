@@ -168,13 +168,15 @@ def install_packages(container):
 
 
     print("  Configuring passwordless sudo...")
+    # sudoers.d ignores files containing '.' - use a safe filename.
+    # Use User_Alias with #uid to avoid issues with '@' in the username.
     run(
         [
             "lxc", "exec", container, "--",
             "bash", "-c",
-            f"echo '#{CONTAINER_UID} ALL=(ALL) NOPASSWD:ALL'"
-            f" > /etc/sudoers.d/{CONTAINER_USER}"
-            f" && chmod 440 /etc/sudoers.d/{CONTAINER_USER}",
+            f"printf 'User_Alias CONTAINERUSER = #{CONTAINER_UID}\\nCONTAINERUSER ALL=(ALL) NOPASSWD:ALL\\n'"
+            f" > /etc/sudoers.d/nopasswd-user"
+            f" && chmod 440 /etc/sudoers.d/nopasswd-user",
         ]
     )
 
