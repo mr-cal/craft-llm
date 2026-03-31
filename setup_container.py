@@ -166,12 +166,15 @@ def install_packages(container):
     )
     run(["lxc", "exec", container, "--", "bash", "-c", gh_setup])
 
-    print("  Installing GitHub Copilot CLI...")
+
+    print("  Configuring passwordless sudo...")
     run(
         [
             "lxc", "exec", container, "--",
             "bash", "-c",
-            "set -euo pipefail\ncurl -fsSL https://gh.io/copilot-install | bash",
+            f"echo '{CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL'"
+            f" > /etc/sudoers.d/{CONTAINER_USER}"
+            f" && chmod 440 /etc/sudoers.d/{CONTAINER_USER}",
         ]
     )
 
@@ -228,28 +231,6 @@ def run_tests(container):
             ["lxc", "exec", container, "--", "gh", "--version"],
             capture_output=True,
             check=True,
-        )
-
-    def t_copilot_installed():
-        r = subprocess.run(
-            [
-                "lxc",
-                "exec",
-                container,
-                f"--user={CONTAINER_UID}",
-                f"--group={CONTAINER_GID}",
-                "--env",
-                f"HOME={CONTAINER_HOME}",
-                "--",
-                "copilot",
-                "--version",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 0, f"exit {r.returncode}: {r.stderr.strip()}"
-        assert "copilot" in (r.stdout + r.stderr).lower(), (
-            f"unexpected output: {r.stdout!r}"
         )
 
     def t_dev_mount_read():
@@ -351,7 +332,6 @@ def run_tests(container):
         ("Container running", t_running),
         ("build-essential installed", t_build_essential),
         ("gh installed", t_gh_installed),
-        ("Copilot CLI installed", t_copilot_installed),
         ("dev mount readable", t_dev_mount_read),
         ("dev mount ownership transparent", t_dev_ownership),
         (".github mount works", t_github_mount),
@@ -375,7 +355,11 @@ def run_tests(container):
             f"(host {HOST_UID}:{HOST_GID} ↔ container {CONTAINER_USER})"
         )
         print(f"  Container user: {CONTAINER_USER}")
-        print("  Packages: build-essential, copilot CLI")
+        print("  Packages: build-essential, gh")
+        print("  sudo: passwordless for container user")
+        print("  Next: run 'gh auth login', 'gh copilot', and '/allow-all'")
+        print(" PAT token perms: all repos, actions, issues, merge queues, metadata, pull requests")
+        print("            user: copilot, gists")
         print("  snapcraft make setup: complete")
         print(f"All {total} tests passed.")
         print("=" * 60)
