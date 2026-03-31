@@ -172,11 +172,14 @@ def install_packages(container):
         [
             "lxc", "exec", container, "--",
             "bash", "-c",
-            f"echo '{CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL'"
+            f"echo '#{CONTAINER_UID} ALL=(ALL) NOPASSWD:ALL'"
             f" > /etc/sudoers.d/{CONTAINER_USER}"
             f" && chmod 440 /etc/sudoers.d/{CONTAINER_USER}",
         ]
     )
+
+    print("  Installing astral-uv...")
+    run(["lxc", "exec", container, "--", "snap", "install", "astral-uv", "--classic"])
 
 
 def run_make_setup():
@@ -293,6 +296,21 @@ def run_tests(container):
             if os.path.exists(test_file):
                 os.unlink(test_file)
 
+    def t_passwordless_sudo():
+        subprocess.run(
+            ["lxc", "exec", container, f"--user={CONTAINER_UID}", "--",
+             "sudo", "-n", "true"],
+            capture_output=True,
+            check=True,
+        )
+
+    def t_uv_installed():
+        subprocess.run(
+            ["lxc", "exec", container, "--", "uv", "--version"],
+            capture_output=True,
+            check=True,
+        )
+
     def t_venv_exists():
         subprocess.run(
             [
@@ -332,6 +350,8 @@ def run_tests(container):
         ("Container running", t_running),
         ("build-essential installed", t_build_essential),
         ("gh installed", t_gh_installed),
+        ("passwordless sudo works", t_passwordless_sudo),
+        ("uv installed", t_uv_installed),
         ("dev mount readable", t_dev_mount_read),
         ("dev mount ownership transparent", t_dev_ownership),
         (".github mount works", t_github_mount),
@@ -355,7 +375,7 @@ def run_tests(container):
             f"(host {HOST_UID}:{HOST_GID} ↔ container {CONTAINER_USER})"
         )
         print(f"  Container user: {CONTAINER_USER}")
-        print("  Packages: build-essential, gh")
+        print("  Packages: build-essential, gh, astral-uv")
         print("  sudo: passwordless for container user")
         print("  Next: run 'gh auth login', 'gh copilot', and '/allow-all'")
         print(" PAT token perms: all repos, actions, issues, merge queues, metadata, pull requests")
