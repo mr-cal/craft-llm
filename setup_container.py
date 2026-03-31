@@ -8,8 +8,8 @@ import subprocess
 import sys
 import time
 
-DEFAULT_CONTAINER = "craft-llm"
-CONTAINER = DEFAULT_CONTAINER  # may be overridden in main() via --name
+CONTAINER_PREFIX = "craft-llm"
+CONTAINER = CONTAINER_PREFIX  # overridden in main() with auto-generated name
 HOST_UID = os.getuid()
 HOST_GID = os.getgid()
 HOST_HOME = os.path.expanduser("~")
@@ -23,7 +23,6 @@ CONTAINER_HOME = HOST_HOME
 
 MOUNTS = [
     ("github", f"{HOST_HOME}/.github", f"{CONTAINER_HOME}/.github"),
-    ("copilot", f"{HOST_HOME}/.copilot", f"{CONTAINER_HOME}/.copilot"),
     ("dev", f"{HOST_HOME}/dev", f"{CONTAINER_HOME}/dev"),
 ]
 
@@ -291,13 +290,6 @@ def run_tests():
             check=True,
         )
 
-    def t_copilot_mount():
-        subprocess.run(
-            ["lxc", "exec", CONTAINER, "--", "ls", f"{CONTAINER_HOME}/.copilot"],
-            capture_output=True,
-            check=True,
-        )
-
     def t_write_transparency():
         test_file = f"{HOST_HOME}/dev/.{CONTAINER}_test_file"
         subprocess.run(
@@ -364,7 +356,6 @@ def run_tests():
         ("dev mount readable", t_dev_mount_read),
         ("dev mount ownership transparent", t_dev_ownership),
         (".github mount works", t_github_mount),
-        (".copilot mount works", t_copilot_mount),
         ("Write transparency", t_write_transparency),
         ("make setup completed (.venv)", t_venv_exists),
         (f"container user is {CONTAINER_USER!r}", t_container_user),
@@ -379,7 +370,7 @@ def run_tests():
     if all(results):
         print("=" * 60)
         print("craft-llm container is ready!")
-        print(f"  Mounts: ~/.github, ~/.copilot, ~/dev  →  {CONTAINER_HOME}/{{...}}")
+        print(f"  Mounts: ~/.github, ~/dev  →  {CONTAINER_HOME}/{{...}}")
         print(
             f"  UID/GID mapping: transparent "
             f"(host {HOST_UID}:{HOST_GID} ↔ container {CONTAINER_USER})"
@@ -394,6 +385,16 @@ def run_tests():
         sys.exit(1)
 
 
+def next_container_name():
+    """Return the next unused craft-llm-<N> name (starting at 1)."""
+    r = run_capture(["lxc", "list", "--format=json"])
+    existing = {c["name"] for c in json.loads(r.stdout)} if r.returncode == 0 else set()
+    n = 1
+    while f"{CONTAINER_PREFIX}-{n}" in existing:
+        n += 1
+    return f"{CONTAINER_PREFIX}-{n}"
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -401,31 +402,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Set up an LXD container for copilot development."
     )
-    parser.add_argument(
-        "--name",
-        default=DEFAULT_CONTAINER,
-        help=f"Container name (default: {DEFAULT_CONTAINER}). "
-        f"Use e.g. '{DEFAULT_CONTAINER}-1' to run multiple containers.",
-    )
-    parser.add_argument(
-        "--recreate",
-        action="store_true",
-        help="Delete and recreate the container if it already exists.",
-    )
-    args = parser.parse_args()
+    parser.parse_args()
 
     global CONTAINER
-    CONTAINER = args.name
-
-    if container_exists():
-        if not args.recreate:
-            sys.exit(
-                f"ERROR: Container '{CONTAINER}' already exists. "
-                "Pass --recreate to replace it."
-            )
-        print(f"--recreate: stopping and deleting existing {CONTAINER}...")
-        subprocess.run(["lxc", "stop", "--force", CONTAINER], check=False)
-        subprocess.run(["lxc", "delete", CONTAINER], check=True)
+    CONTAINER = next_container_name()
+    print(f"Creating container: {CONTAINER}")
 
     create_container()
     configure_idmap()
