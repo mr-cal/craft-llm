@@ -21,7 +21,7 @@ CONTAINER_GID = 1000
 CONTAINER_HOME = HOST_HOME
 
 MOUNTS = [
-    ("github", f"{HOST_HOME}/.github", f"{CONTAINER_HOME}/.github"),
+    # ("github", f"{HOST_HOME}/.github", f"{CONTAINER_HOME}/.github"),
     ("dev", f"{HOST_HOME}/dev", f"{CONTAINER_HOME}/dev"),
 ]
 
@@ -97,19 +97,30 @@ def create_container(container):
     # without any symlinks or re-syncing.
     run(
         [
-            "lxc", "exec", container, "--",
+            "lxc",
+            "exec",
+            container,
+            "--",
             "usermod",
             "--badname",
-            "--login", CONTAINER_USER,
-            "--home", CONTAINER_HOME,
+            "--login",
+            CONTAINER_USER,
+            "--home",
+            CONTAINER_HOME,
             "--move-home",
             "ubuntu",
         ]
     )
     run(
         [
-            "lxc", "exec", container, "--",
-            "groupmod", "--new-name", CONTAINER_USER, "ubuntu",
+            "lxc",
+            "exec",
+            container,
+            "--",
+            "groupmod",
+            "--new-name",
+            CONTAINER_USER,
+            "ubuntu",
         ]
     )
 
@@ -166,14 +177,17 @@ def install_packages(container):
     )
     run(["lxc", "exec", container, "--", "bash", "-c", gh_setup])
 
-
     print("  Configuring passwordless sudo...")
     # sudoers.d ignores files containing '.' - use a safe filename.
     # Use User_Alias with #uid to avoid issues with '@' in the username.
     run(
         [
-            "lxc", "exec", container, "--",
-            "bash", "-c",
+            "lxc",
+            "exec",
+            container,
+            "--",
+            "bash",
+            "-c",
             f"printf 'User_Alias CONTAINERUSER = #{CONTAINER_UID}\\nCONTAINERUSER ALL=(ALL) NOPASSWD:ALL\\n'"
             f" > /etc/sudoers.d/nopasswd-user"
             f" && chmod 440 /etc/sudoers.d/nopasswd-user",
@@ -191,7 +205,9 @@ def run_make_setup():
     username, same home path), the venv scripts produced here have shebangs that
     resolve correctly in both environments without any extra steps.
     """
-    snapcraft_dir = os.path.join(HOST_HOME, "dev", "craft", "snapcraft")
+    snapcraft_dir = os.path.join(
+        HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-main"
+    )
     if not os.path.isdir(snapcraft_dir):
         print(f"ERROR: snapcraft directory not found: {snapcraft_dir}", file=sys.stderr)
         sys.exit(1)
@@ -300,8 +316,16 @@ def run_tests(container):
 
     def t_passwordless_sudo():
         subprocess.run(
-            ["lxc", "exec", container, f"--user={CONTAINER_UID}", "--",
-             "sudo", "-n", "true"],
+            [
+                "lxc",
+                "exec",
+                container,
+                f"--user={CONTAINER_UID}",
+                "--",
+                "sudo",
+                "-n",
+                "true",
+            ],
             capture_output=True,
             check=True,
         )
@@ -321,7 +345,7 @@ def run_tests(container):
                 container,
                 "--",
                 "ls",
-                f"{CONTAINER_HOME}/dev/craft/snapcraft/.venv",
+                f"{CONTAINER_HOME}/dev/craft/snapcraft/snapcraft-main/.venv",
             ],
             capture_output=True,
             check=True,
@@ -342,7 +366,7 @@ def run_tests(container):
     def t_venv_interpreter_valid():
         """Venv Python interpreter must be executable on the host."""
         python = os.path.join(
-            HOST_HOME, "dev", "craft", "snapcraft", ".venv", "bin", "python3"
+            HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-main", ".venv", "bin", "python3"
         )
         assert os.path.exists(python), f"not found: {python}"
         r = subprocess.run([python, "--version"], capture_output=True, text=True)
@@ -380,7 +404,10 @@ def run_tests(container):
         print("  Packages: build-essential, gh, astral-uv")
         print("  sudo: passwordless for container user")
         print("  Next: run 'gh auth login', 'gh copilot', and '/allow-all'")
-        print(" PAT token perms: all repos, actions, issues, merge queues, metadata, pull requests")
+        print(
+            " PAT token perms: "
+            "all repos, actions, issues, merge queues, metadata, pull requests"
+        )
         print("            user: copilot, gists")
         print("  snapcraft make setup: complete")
         print(f"All {total} tests passed.")
