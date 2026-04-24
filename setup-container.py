@@ -25,6 +25,31 @@ MOUNTS = [
     ("dev", f"{HOST_HOME}/dev", f"{CONTAINER_HOME}/dev"),
 ]
 
+MAKE_SETUP_DIRS = [
+    os.path.join(HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-a"),
+    os.path.join(HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-b"),
+    os.path.join(HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-main"),
+    os.path.join(HOST_HOME, "dev", "craft", "craft-parts"),
+    os.path.join(HOST_HOME, "dev", "craft", "craft-providers"),
+    os.path.join(HOST_HOME, "dev", "craft", "craft-application"),
+    os.path.join(HOST_HOME, "dev", "craft", "craft-cli"),
+    os.path.join(HOST_HOME, "dev", "craft", "craft-grammar"),
+]
+
+LSP_CONFIG_PATH = f"{CONTAINER_HOME}/.copilot/lsp-config.json"
+
+PYLSP_LSP_CONFIG = {
+    "lspServers": {
+        "python": {
+            "command": "pylsp",
+            "args": [],
+            "fileExtensions": {
+                ".py": "python",
+            },
+        }
+    }
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -88,7 +113,7 @@ def container_exists(container):
 
 
 def create_container(container):
-    print(f"\n[1/5] Launching {container} (ubuntu:24.04)...")
+    print(f"\n[1/6] Launching {container} (ubuntu:24.04)...")
     run(["lxc", "launch", "ubuntu:24.04", container])
     wait_for_container(container)
     # Rename the default ubuntu user/group to match the host user, and move the
@@ -127,7 +152,7 @@ def create_container(container):
 
 def configure_idmap(container):
     print(
-        f"\n[2/5] Configuring UID/GID mapping "
+        f"\n[2/6] Configuring UID/GID mapping "
         f"(host {HOST_UID}:{HOST_GID} → container {CONTAINER_UID}:{CONTAINER_GID})..."
     )
     idmap = f"uid {HOST_UID} {CONTAINER_UID}\ngid {HOST_GID} {CONTAINER_GID}"
@@ -137,7 +162,7 @@ def configure_idmap(container):
 
 
 def add_mounts(container):
-    print("\n[3/5] Adding bind mounts...")
+    print("\n[3/6] Adding bind mounts...")
     for name, host_path, container_path in MOUNTS:
         os.makedirs(host_path, exist_ok=True)
         run(
@@ -158,7 +183,7 @@ def add_mounts(container):
 
 
 def install_packages(container):
-    print("\n[4/5] Installing packages...")
+    print("\n[4/6] Installing packages...")
     run(["lxc", "exec", container, "--", "apt-get", "update", "-q"])
     run(["lxc", "exec", container, "--", "apt-get", "install", "-y", "build-essential"])
 
@@ -198,21 +223,67 @@ def install_packages(container):
     run(["lxc", "exec", container, "--", "snap", "install", "astral-uv", "--classic"])
 
 
-def run_make_setup():
-    """Run ``make setup`` on the host.
+def run_make_setup(container):
+    """Run ``make setup`` in each craft project directory inside the container.
 
-    Because the container user has been renamed to match the host user (same
-    username, same home path), the venv scripts produced here have shebangs that
-    resolve correctly in both environments without any extra steps.
+    The directories live under ~/dev which is bind-mounted, so the resulting
+    venvs are visible on the host at the same paths.  ``make setup`` may be
+    interactive (it installs apt packages via sudo), so stdin is inherited from
+    the calling terminal.
     """
-    snapcraft_dir = os.path.join(
-        HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-main"
+    print(f"\n[5/6] Running make setup in craft directories (in container)...")
+    for directory in MAKE_SETUP_DIRS:
+        if not os.path.isdir(directory):
+            print(f"  WARNING: directory not found on host, skipping: {directory}")
+            continue
+        print(f"  Running make setup in {directory}...")
+        run(
+            [
+                "lxc", "exec", container,
+                f"--user={CONTAINER_UID}",
+                f"--group={CONTAINER_GID}",
+                f"--env=HOME={CONTAINER_HOME}",
+                "--",
+                "make", "-C", directory, "setup",
+            ],
+        )
+
+
+def install_pylsp(container):
+    """Install python-lsp-server via uv tool inside the container, ensure it is
+    on PATH, and write the gh copilot LSP config into the container."""
+    print("\n[6/6] Installing pylsp (python-lsp-server) in container...")
+
+    def cexec(*cmd):
+        return [
+            "lxc", "exec", container,
+            f"--user={CONTAINER_UID}",
+            f"--group={CONTAINER_GID}",
+            f"--env=HOME={CONTAINER_HOME}",
+            "--", *cmd,
+        ]
+
+    run(cexec("uv", "tool", "install", "python-lsp-server"))
+    run(cexec("uv", "tool", "update-shell"))
+
+    print(f"  Writing LSP config to {CONTAINER_HOME}/.copilot/lsp-config.json in container...")
+    run(cexec("mkdir", "-p", f"{CONTAINER_HOME}/.copilot"))
+
+    # Read any existing config from the container, then merge and write back.
+    r = subprocess.run(
+        cexec("cat", f"{CONTAINER_HOME}/.copilot/lsp-config.json"),
+        capture_output=True,
+        text=True,
     )
-    if not os.path.isdir(snapcraft_dir):
-        print(f"ERROR: snapcraft directory not found: {snapcraft_dir}", file=sys.stderr)
-        sys.exit(1)
-    print(f"\n[5/5] Running make setup in snapcraft ({snapcraft_dir})...")
-    run(["make", "setup"], cwd=snapcraft_dir)
+    existing = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    existing.setdefault("lspServers", {}).update(PYLSP_LSP_CONFIG["lspServers"])
+    config_json = json.dumps(existing, indent=2) + "\n"
+
+    subprocess.run(
+        cexec("bash", "-c", f"cat > {CONTAINER_HOME}/.copilot/lsp-config.json"),
+        input=config_json.encode(),
+        check=True,
+    )
 
 
 # ── Verification tests ────────────────────────────────────────────────────────
@@ -338,18 +409,19 @@ def run_tests(container):
         )
 
     def t_venv_exists():
-        subprocess.run(
-            [
-                "lxc",
-                "exec",
-                container,
-                "--",
-                "ls",
-                f"{CONTAINER_HOME}/dev/craft/snapcraft/snapcraft-main/.venv",
-            ],
-            capture_output=True,
-            check=True,
-        )
+        missing = []
+        for directory in MAKE_SETUP_DIRS:
+            # Only check directories that exist on the host
+            if not os.path.isdir(directory):
+                continue
+            venv = os.path.join(directory, ".venv")
+            r = subprocess.run(
+                ["lxc", "exec", container, "--", "ls", venv],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                missing.append(directory)
+        assert not missing, f"missing .venv in: {missing}"
 
     def t_container_user():
         r = subprocess.run(
@@ -364,13 +436,51 @@ def run_tests(container):
         )
 
     def t_venv_interpreter_valid():
-        """Venv Python interpreter must be executable on the host."""
-        python = os.path.join(
-            HOST_HOME, "dev", "craft", "snapcraft", "snapcraft-main", ".venv", "bin", "python3"
+        """Venv Python interpreter must be executable on the host in all setup dirs."""
+        failures = []
+        for directory in MAKE_SETUP_DIRS:
+            if not os.path.isdir(directory):
+                continue
+            python = os.path.join(directory, ".venv", "bin", "python3")
+            if not os.path.exists(python):
+                failures.append(f"not found: {python}")
+                continue
+            r = subprocess.run([python, "--version"], capture_output=True, text=True)
+            if r.returncode != 0:
+                failures.append(f"{python}: exit {r.returncode}: {r.stderr.strip()}")
+        assert not failures, "\n".join(failures)
+
+    def t_pylsp_installed():
+        pylsp_bin = f"{CONTAINER_HOME}/.local/bin/pylsp"
+        r = subprocess.run(
+            [
+                "lxc", "exec", container,
+                f"--user={CONTAINER_UID}",
+                f"--env=HOME={CONTAINER_HOME}",
+                "--",
+                pylsp_bin, "--version",
+            ],
+            capture_output=True,
+            text=True,
         )
-        assert os.path.exists(python), f"not found: {python}"
-        r = subprocess.run([python, "--version"], capture_output=True, text=True)
-        assert r.returncode == 0, f"exit {r.returncode}: {r.stderr.strip()}"
+        assert r.returncode == 0, f"pylsp not found in container at {pylsp_bin}: {r.stderr.strip()}"
+
+    def t_pylsp_lsp_config():
+        container_config = f"{CONTAINER_HOME}/.copilot/lsp-config.json"
+        r = subprocess.run(
+            ["lxc", "exec", container, "--", "cat", container_config],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, f"lsp-config.json not found in container at {container_config}"
+        config = json.loads(r.stdout)
+        servers = config.get("lspServers", {})
+        assert "python" in servers, (
+            f"'python' server missing from lspServers: {servers}"
+        )
+        assert servers["python"]["command"] == "pylsp", (
+            f"unexpected command: {servers['python']['command']!r}"
+        )
 
     tests = [
         ("Container running", t_running),
@@ -384,7 +494,9 @@ def run_tests(container):
         ("Write transparency", t_write_transparency),
         ("make setup completed (.venv)", t_venv_exists),
         (f"container user is {CONTAINER_USER!r}", t_container_user),
-        ("venv Python interpreter valid on host", t_venv_interpreter_valid),
+        ("venv Python interpreters valid on host", t_venv_interpreter_valid),
+        ("pylsp installed", t_pylsp_installed),
+        ("pylsp registered in lsp-config.json", t_pylsp_lsp_config),
     ]
 
     results = [check(name, fn) for name, fn in tests]
@@ -409,7 +521,8 @@ def run_tests(container):
             "all repos, actions, issues, merge queues, metadata, pull requests"
         )
         print("            user: copilot, gists")
-        print("  snapcraft make setup: complete")
+        print(f"  make setup: complete ({len(MAKE_SETUP_DIRS)} directories, run in container)")
+        print(f"  pylsp: installed in container (~/.local/bin), config at {LSP_CONFIG_PATH}")
         print(f"All {total} tests passed.")
         print("=" * 60)
     else:
@@ -461,7 +574,8 @@ def main():
     configure_idmap(container)
     add_mounts(container)
     install_packages(container)
-    run_make_setup()
+    run_make_setup(container)
+    install_pylsp(container)
     run_tests(container)
 
 
