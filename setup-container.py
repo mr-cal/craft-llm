@@ -113,7 +113,7 @@ def container_exists(container):
 
 
 def create_container(container):
-    print(f"\n[1/6] Launching {container} (ubuntu:24.04)...")
+    print(f"\n[1/5] Launching {container} (ubuntu:24.04)...")
     run(["lxc", "launch", "ubuntu:24.04", container])
     wait_for_container(container)
     # Rename the default ubuntu user/group to match the host user, and move the
@@ -152,7 +152,7 @@ def create_container(container):
 
 def configure_idmap(container):
     print(
-        f"\n[2/6] Configuring UID/GID mapping "
+        f"\n[2/5] Configuring UID/GID mapping "
         f"(host {HOST_UID}:{HOST_GID} → container {CONTAINER_UID}:{CONTAINER_GID})..."
     )
     idmap = f"uid {HOST_UID} {CONTAINER_UID}\ngid {HOST_GID} {CONTAINER_GID}"
@@ -162,7 +162,7 @@ def configure_idmap(container):
 
 
 def add_mounts(container):
-    print("\n[3/6] Adding bind mounts...")
+    print("\n[3/5] Adding bind mounts...")
     for name, host_path, container_path in MOUNTS:
         os.makedirs(host_path, exist_ok=True)
         run(
@@ -183,7 +183,7 @@ def add_mounts(container):
 
 
 def install_packages(container):
-    print("\n[4/6] Installing packages...")
+    print("\n[4/5] Installing packages...")
     run(["lxc", "exec", container, "--", "apt-get", "update", "-q"])
     run(["lxc", "exec", container, "--", "apt-get", "install", "-y", "build-essential"])
 
@@ -231,7 +231,7 @@ def run_make_setup(container):
     interactive (it installs apt packages via sudo), so stdin is inherited from
     the calling terminal.
     """
-    print(f"\n[5/6] Running make setup in craft directories (in container)...")
+    print(f"\nRunning make setup in craft directories (in container)...")
     for directory in MAKE_SETUP_DIRS:
         if not os.path.isdir(directory):
             print(f"  WARNING: directory not found on host, skipping: {directory}")
@@ -252,7 +252,7 @@ def run_make_setup(container):
 def install_pylsp(container):
     """Install python-lsp-server via uv tool inside the container, ensure it is
     on PATH, and write the gh copilot LSP config into the container."""
-    print("\n[6/6] Installing pylsp (python-lsp-server) in container...")
+    print("\n[5/5] Installing pylsp (python-lsp-server) in container...")
 
     def cexec(*cmd):
         return [
@@ -264,7 +264,12 @@ def install_pylsp(container):
         ]
 
     run(cexec("uv", "tool", "install", "python-lsp-server"))
-    run(cexec("uv", "tool", "update-shell"))
+    # uv tool update-shell can't detect the shell via lxc exec, so append directly.
+    run(cexec(
+        "bash", "-c",
+        r'grep -qxF "export PATH=$HOME/.local/bin:$PATH" ~/.bashrc'
+        r' || echo "export PATH=$HOME/.local/bin:$PATH" >> ~/.bashrc',
+    ))
 
     print(f"  Writing LSP config to {CONTAINER_HOME}/.copilot/lsp-config.json in container...")
     run(cexec("mkdir", "-p", f"{CONTAINER_HOME}/.copilot"))
@@ -492,9 +497,7 @@ def run_tests(container):
         ("dev mount ownership transparent", t_dev_ownership),
         (".github mount works", t_github_mount),
         ("Write transparency", t_write_transparency),
-        ("make setup completed (.venv)", t_venv_exists),
         (f"container user is {CONTAINER_USER!r}", t_container_user),
-        ("venv Python interpreters valid on host", t_venv_interpreter_valid),
         ("pylsp installed", t_pylsp_installed),
         ("pylsp registered in lsp-config.json", t_pylsp_lsp_config),
     ]
@@ -521,10 +524,59 @@ def run_tests(container):
             "all repos, actions, issues, merge queues, metadata, pull requests"
         )
         print("            user: copilot, gists")
-        print(f"  make setup: complete ({len(MAKE_SETUP_DIRS)} directories, run in container)")
         print(f"  pylsp: installed in container (~/.local/bin), config at {LSP_CONFIG_PATH}")
+        print(f"  Craft setup: run './setup-container.py {container.split('-')[-1]} --setup-crafts' when ready")
         print(f"All {total} tests passed.")
         print("=" * 60)
+    else:
+        print(f"{passed}/{total} tests passed. See failures above.")
+        sys.exit(1)
+
+
+def run_craft_setup_tests(container):
+    print("\n── Craft setup verification ────────────────────────────────────")
+
+    def t_venv_exists():
+        missing = []
+        for directory in MAKE_SETUP_DIRS:
+            if not os.path.isdir(directory):
+                continue
+            venv = os.path.join(directory, ".venv")
+            r = subprocess.run(
+                ["lxc", "exec", container, "--", "ls", venv],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                missing.append(directory)
+        assert not missing, f"missing .venv in: {missing}"
+
+    def t_venv_interpreter_valid():
+        """Venv Python interpreter must be executable on the host in all setup dirs."""
+        failures = []
+        for directory in MAKE_SETUP_DIRS:
+            if not os.path.isdir(directory):
+                continue
+            python = os.path.join(directory, ".venv", "bin", "python3")
+            if not os.path.exists(python):
+                failures.append(f"not found: {python}")
+                continue
+            r = subprocess.run([python, "--version"], capture_output=True, text=True)
+            if r.returncode != 0:
+                failures.append(f"{python}: exit {r.returncode}: {r.stderr.strip()}")
+        assert not failures, "\n".join(failures)
+
+    tests = [
+        ("make setup completed (.venv)", t_venv_exists),
+        ("venv Python interpreters valid on host", t_venv_interpreter_valid),
+    ]
+
+    results = [check(name, fn) for name, fn in tests]
+    passed = sum(results)
+    total = len(results)
+
+    print()
+    if all(results):
+        print(f"All {total} craft setup tests passed.")
     else:
         print(f"{passed}/{total} tests passed. See failures above.")
         sys.exit(1)
@@ -537,9 +589,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Set up an LXD container for copilot development.",
         epilog=(
-            "Example:\n"
-            "  %(prog)s 1              # create craft-llm-1\n"
-            "  %(prog)s 2 --recreate   # delete and recreate craft-llm-2"
+            "Examples:\n"
+            "  %(prog)s 1                   # create craft-llm-1\n"
+            "  %(prog)s 2 --recreate        # delete and recreate craft-llm-2\n"
+            "  %(prog)s 1 --setup-crafts    # run make setup in all craft dirs"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -553,9 +606,29 @@ def main():
         action="store_true",
         help="Delete the container if it already exists, then recreate it.",
     )
+    parser.add_argument(
+        "--setup-crafts",
+        action="store_true",
+        help=(
+            "Run 'make setup' in all craft project directories inside an "
+            "existing container, then verify the venvs."
+        ),
+    )
     args = parser.parse_args()
 
     container = f"{CONTAINER_PREFIX}-{args.number}"
+
+    if args.setup_crafts:
+        if not container_exists(container):
+            print(
+                f"ERROR: container '{container}' does not exist. "
+                "Create it first without --setup-crafts.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        run_make_setup(container)
+        run_craft_setup_tests(container)
+        return
 
     if container_exists(container):
         if not args.recreate:
@@ -574,7 +647,6 @@ def main():
     configure_idmap(container)
     add_mounts(container)
     install_packages(container)
-    run_make_setup(container)
     install_pylsp(container)
     run_tests(container)
 
