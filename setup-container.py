@@ -243,6 +243,7 @@ def run_make_setup(container):
                 f"--user={CONTAINER_UID}",
                 f"--group={CONTAINER_GID}",
                 f"--env=HOME={CONTAINER_HOME}",
+                "--env=CI=1",
                 "--",
                 "make", "-C", directory, "setup",
             ],
